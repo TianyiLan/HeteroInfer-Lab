@@ -30,7 +30,7 @@ from typing import Any
 
 import torch
 
-from edge_llm_systems.utils import append_row_to_csv, save_json
+from edge_llm_systems.utils import append_row_to_csv, save_json, build_timestamp_filename
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 基准配置表
@@ -484,15 +484,10 @@ def run_text_quality_suite(
 ) -> list[dict]:
     """运行所有（或指定的）文本质量基准，保存结果。
 
-    结果目录结构（在 model_result_dir 下）：
-        quality_raw/
-        ├── {run_id}_mmlu_pro_mini_raw.csv
-        ├── {run_id}_gsm8k_mini_raw.csv
-        ├── {run_id}_hellaswag_mini_raw.csv
-        ├── {run_id}_winogrande_mini_raw.csv
-        └── {run_id}_truthfulqa_mc_raw.csv
-        quality_summary/
-        └── {run_id}_quality_summary.json
+    结果直接平铺在 model_result_dir 下（与性能结果同级）：
+        qual_raw_{benchmark}_{ts}.csv   — per-sample 原始数据（每个基准一个文件）
+        qual_summary_{ts}.json          — 汇总分数（所有基准）
+    通过文件名前缀 qual_ 与性能文件（perf_ 前缀）区分，run_id 字段关联两者。
 
     Args:
         model: 已加载的语言模型
@@ -512,10 +507,7 @@ def run_text_quality_suite(
         benchmarks = list(BENCHMARK_CONFIGS.keys())
 
     model_result_dir = Path(model_result_dir)
-    quality_raw_dir  = model_result_dir / "quality_raw"
-    quality_sum_dir  = model_result_dir / "quality_summary"
-    quality_raw_dir.mkdir(parents=True, exist_ok=True)
-    quality_sum_dir.mkdir(parents=True, exist_ok=True)
+    model_result_dir.mkdir(parents=True, exist_ok=True)
 
     all_results: list[dict] = []
 
@@ -524,7 +516,8 @@ def run_text_quality_suite(
             print(f"[Quality] ⚠️  Unknown benchmark: {bm_name!r}, skipping")
             continue
 
-        raw_csv = quality_raw_dir / f"{run_id}_{bm_name}_raw.csv"
+        # qual_raw_{benchmark}_{YYYYMMDD_HHMMSS}.csv — 平铺在模型结果目录
+        raw_csv = model_result_dir / build_timestamp_filename(f"qual_raw_{bm_name}", "csv")
         result  = run_single_benchmark(
             benchmark_name=bm_name,
             model=model, tokenizer=tokenizer, device=device,
@@ -534,7 +527,7 @@ def run_text_quality_suite(
         )
         all_results.append(result)
 
-    # 汇总 JSON
+    # 汇总 JSON：qual_summary_{ts}.json
     import datetime
     summary = {
         "run_id":        run_id,
@@ -546,7 +539,7 @@ def run_text_quality_suite(
             sum(r["accuracy"] for r in all_results) / len(all_results), 2
         ) if all_results else 0.0,
     }
-    summary_path = quality_sum_dir / f"{run_id}_quality_summary.json"
+    summary_path = model_result_dir / build_timestamp_filename("qual_summary", "json")
     save_json(summary_path, summary)
 
     print(f"\n[Quality] ✅ 文本基准完成 — 平均准确率 {summary['mean_accuracy']:.1f}%")
