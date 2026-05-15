@@ -156,6 +156,185 @@ def build_timestamp_filename(prefix: str, ext: str) -> str:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Exp Info：环境、模型、运行配置 JSON 收集与保存
+# ──────────────────────────────────────────────────────────────────────────────
+
+def save_json(path: str | Path, data: dict) -> None:
+    """将 dict 以格式化 JSON 保存到指定路径（UTF-8 编码）。
+
+    目录不存在时自动创建。
+
+    Args:
+        path: 目标文件路径
+        data: 要保存的字典
+    """
+    import json
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def collect_environment_info(
+    run_id: str,
+    model_id: str,
+    model_key: str,
+    raw_csv_path: str,
+    summary_csv_path: str,
+) -> dict:
+    """收集运行时环境信息，用于实验复现和跨平台对比。
+
+    包含：Python 版本、平台、PyTorch/transformers 版本、GPU 型号、
+    CUDA 版本、显存大小、本次实验的输出文件路径。
+
+    Args:
+        run_id: 本次运行的唯一标识符
+        model_id: HuggingFace repo id
+        model_key: MODEL_REGISTRY 中的键
+        raw_csv_path: raw_runs CSV 路径
+        summary_csv_path: group_summary CSV 路径
+
+    Returns:
+        环境信息字典
+    """
+    import platform as _platform
+    import torch
+    import transformers
+    import pandas as pd
+
+    info: dict = {
+        "run_id": run_id,
+        "model_id": model_id,
+        "model_key": model_key,
+        "python": _platform.python_version(),
+        "platform": _platform.platform(),
+        "pytorch": torch.__version__,
+        "transformers": transformers.__version__,
+        "pandas": pd.__version__,
+        "cuda_available": torch.cuda.is_available(),
+    }
+
+    if torch.cuda.is_available():
+        info["cuda_runtime"] = torch.version.cuda
+        info["gpu"] = torch.cuda.get_device_name(0)
+        info["cuda_capability"] = list(torch.cuda.get_device_capability(0))
+        props = torch.cuda.get_device_properties(0)
+        info["gpu_memory_gb"] = round(props.total_memory / 1024 ** 3, 2)
+
+    info["raw_csv_path"] = str(raw_csv_path)
+    info["summary_csv_path"] = str(summary_csv_path)
+    return info
+
+
+def collect_model_info(
+    model: Any,
+    model_id: str,
+    model_key: str,
+    local_model_path: str | Path,
+) -> dict:
+    """收集模型架构元数据，用于记录实验配置和估算 KV Cache。
+
+    包含：层数、注意力头数、KV 头数、hidden size、head dim、
+    参数量、FP16 显存占用、每千 token 的 KV Cache 大小。
+
+    Args:
+        model: 已加载的模型对象
+        model_id: HuggingFace repo id
+        model_key: MODEL_REGISTRY 中的键
+        local_model_path: 本地模型目录路径
+
+    Returns:
+        模型信息字典
+    """
+    cfg = model.config
+
+    num_layers    = getattr(cfg, "num_hidden_layers", None)
+    num_attn      = getattr(cfg, "num_attention_heads", None)
+    num_kv_heads  = getattr(cfg, "num_key_value_heads", num_attn)
+    hidden_size   = getattr(cfg, "hidden_size", None)
+    head_dim      = getattr(cfg, "head_dim",
+                            (hidden_size // num_attn
+                             if hidden_size and num_attn else None))
+
+    # 参数量统计（仅计算可训练参数，忽略 buffer）
+    total_params   = sum(p.numel() for p in model.parameters())
+    param_size_mb  = round(total_params * 2 / 1024 ** 2, 1)   # FP16 = 2 bytes
+
+    # 每千 token 的 KV Cache 开销：2（K+V）× 层数 × kv_heads × head_dim × 1000 × 2（FP16）
+    kv_mb_per_1k: float | None = None
+    if all(v is not None for v in [num_layers, num_kv_heads, head_dim]):
+        kv_bytes     = 2 * num_layers * num_kv_heads * head_dim * 1000 * 2
+        kv_mb_per_1k = round(kv_bytes / 1024 ** 2, 2)
+
+    return {
+        "model_id":            model_id,
+        "model_key":           model_key,
+        "model_path":          str(local_model_path),
+        "model_type":          getattr(cfg, "model_type", "unknown"),
+        "layers":              num_layers,
+        "hidden_size":         hidden_size,
+        "attention_heads":     num_attn,
+        "kv_heads":            num_kv_heads,
+        "head_dim":            head_dim,
+        "torch_dtype":         "fp16",
+        "parameter_count_b":   round(total_params / 1e9, 3),
+        "parameter_size_mb":   param_size_mb,
+        "kv_mb_per_1k_tokens": kv_mb_per_1k,
+    }
+
+
+def collect_run_config(
+    run_id: str,
+    model_id: str,
+    model_key: str,
+    config: dict,
+    raw_csv_path: str,
+    summary_csv_path: str,
+) -> dict:
+    """收集本次实验的完整运行配置，便于复现和回溯。
+
+    包含：实验名称、模型信息、输入模式、参数矩阵、输出路径。
+
+    Args:
+        run_id: 本次运行的唯一标识符
+        model_id: HuggingFace repo id
+        model_key: MODEL_REGISTRY 中的键
+        config: notebook Section 3 确认的配置字典
+        raw_csv_path: raw_runs CSV 路径
+        summary_csv_path: group_summary CSV 路径
+
+    Returns:
+        运行配置字典
+    """
+    input_mode = config.get("input_mode", "text_only")
+    info: dict = {
+        "run_id":          run_id,
+        "experiment_name": "exp001_llama32_stage1_v2.1",
+        "model_id":        model_id,
+        "model_key":       model_key,
+        "input_mode":      input_mode,
+        "torch_dtype":     "float16",
+        "repeat":          config.get("repeat"),
+        "gen_lengths":     config.get("gen_lengths", []),
+        "raw_csv_path":    str(raw_csv_path),
+        "summary_csv_path": str(summary_csv_path),
+    }
+
+    if input_mode == "text_only":
+        prompt_lengths = config.get("prompt_lengths", [])
+        gen_lengths    = config.get("gen_lengths", [])
+        info["prompt_lengths"]  = prompt_lengths
+        # 完整参数矩阵，方便直接查看总组数
+        info["matrix_configs"]  = [
+            [p, g] for p in prompt_lengths for g in gen_lengths
+        ]
+    else:
+        info["image_resolutions"] = config.get("image_resolutions", [])
+
+    return info
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Thinking Mode 预留接口
 # ──────────────────────────────────────────────────────────────────────────────
 
