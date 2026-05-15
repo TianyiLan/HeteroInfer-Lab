@@ -30,59 +30,71 @@ from typing import Any
 
 import torch
 
-from edge_llm_systems.utils import append_row_to_csv, save_json, build_timestamp_filename
+from edge_llm_systems.utils import append_row_to_csv, save_json, build_timestamp_filename, log
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 基准配置表
 # ──────────────────────────────────────────────────────────────────────────────
 
 BENCHMARK_CONFIGS: dict[str, dict] = {
-    "mmlu_pro_mini": {
-        "hf_id":         "TIGER-Lab/MMLU-Pro",
-        "hf_split":      "test",
-        "max_samples":   70,
+    "mmlu_pro": {
+        "hf_id":          "TIGER-Lab/MMLU-Pro",
+        "hf_split":       "test",
+        "max_samples":    500,   # full test=12K; 500 → ±4.4% CI@95%，主流论文水平
         "max_new_tokens": 10,
-        "description":   "大学级多选知识题 (A–J)",
+        "description":    "大学级多选知识题 (A–J)，5-shot（待实现）",
+        "standard_shots": 5,
     },
-    "gsm8k_mini": {
-        "hf_id":         "openai/gsm8k",
-        "hf_name":       "main",
-        "hf_split":      "test",
-        "max_samples":   50,
-        "max_new_tokens": 256,
-        "description":   "数学应用题（提取最终数字）",
+    "gsm8k": {
+        "hf_id":          "openai/gsm8k",
+        "hf_name":        "main",
+        "hf_split":       "test",
+        "max_samples":    500,   # full test=1319；500 是常用子集大小
+        "max_new_tokens": 512,   # CoT 需要更多 token（8-shot CoT 待实现）
+        "description":    "数学应用题（最终数字），8-shot CoT（待实现）",
+        "standard_shots": 8,
     },
-    "hellaswag_mini": {
-        "hf_id":         "Rowan/hellaswag",
-        "hf_split":      "validation",
-        "max_samples":   50,
+    "hellaswag": {
+        "hf_id":          "Rowan/hellaswag",
+        "hf_split":       "validation",
+        "max_samples":    500,   # full val=10K；500 → ±4.4% CI@95%
         "max_new_tokens": 10,
-        "description":   "常识句子补全 (A–D)",
+        "description":    "常识句子补全 (A–D)，10-shot（待实现）",
+        "standard_shots": 10,
     },
-    "winogrande_mini": {
-        "hf_id":         "allenai/winogrande",
-        "hf_name":       "winogrande_xl",
-        "hf_split":      "validation",
-        "max_samples":   50,
+    "winogrande": {
+        "hf_id":          "allenai/winogrande",
+        "hf_name":        "winogrande_xl",
+        "hf_split":       "validation",
+        "max_samples":    500,   # full val=1267；取 500 覆盖 ~40%
         "max_new_tokens": 10,
-        "description":   "代词消歧二选一 (A/B)",
+        "description":    "代词消歧二选一 (A/B)，5-shot（待实现）",
+        "standard_shots": 5,
     },
     "truthfulqa_mc": {
-        "hf_id":         "truthful_qa",
-        "hf_name":       "multiple_choice",
-        "hf_split":      "validation",
-        "max_samples":   50,
+        "hf_id":          "truthful_qa",
+        "hf_name":        "multiple_choice",
+        "hf_split":       "validation",
+        "max_samples":    817,   # full val=817；直接跑全集，0-shot（设计如此）
         "max_new_tokens": 10,
-        "description":   "事实性多选题 MC1",
+        "description":    "事实性多选题 MC1，0-shot（原论文设计）",
+        "standard_shots": 0,
     },
 }
 
-# per-sample CSV 字段顺序
+# per-sample CSV 字段顺序（qual_raw_{benchmark}_{ts}.csv）
 QUALITY_RAW_FIELDNAMES: list[str] = [
     "run_id", "model_id", "benchmark", "seed", "sample_id",
     "question_truncated", "correct_answer",
     "model_output_truncated", "parsed_answer", "is_correct",
     "generation_time_ms", "input_tokens", "output_tokens",
+]
+
+# 汇总 CSV 字段顺序（qual_summary_{ts}.csv，一行 = 一个基准）
+QUALITY_SUMMARY_FIELDNAMES: list[str] = [
+    "run_id", "model_id", "seed", "timestamp",
+    "benchmark", "accuracy", "answer_rate",
+    "num_correct", "num_samples", "num_skipped",
 ]
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -527,23 +539,32 @@ def run_text_quality_suite(
         )
         all_results.append(result)
 
-    # 汇总 JSON：qual_summary_{ts}.json
+    # 汇总 CSV：qual_summary_{ts}.csv — 一行 = 一个基准，与 perf_summary 格式对齐
     import datetime
-    summary = {
-        "run_id":        run_id,
-        "model_id":      model_id,
-        "seed":          seed,
-        "timestamp":     datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "benchmarks":    all_results,
-        "mean_accuracy": round(
-            sum(r["accuracy"] for r in all_results) / len(all_results), 2
-        ) if all_results else 0.0,
-    }
-    summary_path = model_result_dir / build_timestamp_filename("qual_summary", "json")
-    save_json(summary_path, summary)
+    ts_str       = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    summary_path = model_result_dir / build_timestamp_filename("qual_summary", "csv")
 
-    print(f"\n[Quality] ✅ 文本基准完成 — 平均准确率 {summary['mean_accuracy']:.1f}%")
-    print(f"[Quality] Summary → {summary_path.name}")
+    for r in all_results:
+        row = {
+            "run_id":       run_id,
+            "model_id":     model_id,
+            "seed":         seed,
+            "timestamp":    ts_str,
+            "benchmark":    r["benchmark"],
+            "accuracy":     r["accuracy"],
+            "answer_rate":  r["answer_rate"],
+            "num_correct":  r["num_correct"],
+            "num_samples":  r["num_samples"],
+            "num_skipped":  r["num_skipped"],
+        }
+        append_row_to_csv(summary_path, row, QUALITY_SUMMARY_FIELDNAMES)
+
+    mean_acc = (
+        round(sum(r["accuracy"] for r in all_results) / len(all_results), 2)
+        if all_results else 0.0
+    )
+    log(f"[Quality] ✅ 文本基准完成 — 平均准确率 {mean_acc:.1f}%")
+    log(f"[Quality] Summary → {summary_path.name}")
     for r in all_results:
         print(f"  {r['benchmark']:20s}  {r['accuracy']:5.1f}%  "
               f"({r['num_correct']}/{r['num_samples']})")
