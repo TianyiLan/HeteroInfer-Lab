@@ -38,47 +38,57 @@ from edge_llm_systems.utils import append_row_to_csv, save_json, build_timestamp
 
 BENCHMARK_CONFIGS: dict[str, dict] = {
     "mmlu_pro": {
-        "hf_id":          "TIGER-Lab/MMLU-Pro",
-        "hf_split":       "test",
-        "max_samples":    500,   # full test=12K; 500 → ±4.4% CI@95%，主流论文水平
-        "max_new_tokens": 10,
-        "description":    "大学级多选知识题 (A–J)，5-shot（待实现）",
-        "standard_shots": 5,
+        "hf_id":             "TIGER-Lab/MMLU-Pro",
+        "hf_split":          "test",
+        "few_shot_hf_split": "validation",   # 5-shot 示例取自 val，测试取自 test
+        "max_samples":       500,            # full test=12K; 500 → ±4.4% CI@95%
+        "max_new_tokens":    10,
+        "standard_shots":    5,
+        "use_cot":           False,
+        "description":       "大学级多选知识题 (A–J)，5-shot",
     },
     "gsm8k": {
-        "hf_id":          "openai/gsm8k",
-        "hf_name":        "main",
-        "hf_split":       "test",
-        "max_samples":    500,   # full test=1319；500 是常用子集大小
-        "max_new_tokens": 512,   # CoT 需要更多 token（8-shot CoT 待实现）
-        "description":    "数学应用题（最终数字），8-shot CoT（待实现）",
-        "standard_shots": 8,
+        "hf_id":             "openai/gsm8k",
+        "hf_name":           "main",
+        "hf_split":          "test",
+        "few_shot_hf_split": "train",        # 8-shot CoT 示例取自 train
+        "max_samples":       500,            # full test=1319；500 是常用子集
+        "max_new_tokens":    512,            # CoT 推理链需要更多 token
+        "standard_shots":    8,
+        "use_cot":           True,           # 8-shot Chain-of-Thought
+        "description":       "数学应用题，8-shot CoT",
     },
     "hellaswag": {
-        "hf_id":          "Rowan/hellaswag",
-        "hf_split":       "validation",
-        "max_samples":    500,   # full val=10K；500 → ±4.4% CI@95%
-        "max_new_tokens": 10,
-        "description":    "常识句子补全 (A–D)，10-shot（待实现）",
-        "standard_shots": 10,
+        "hf_id":             "Rowan/hellaswag",
+        "hf_split":          "validation",
+        "few_shot_hf_split": "train",        # 10-shot 示例取自 train
+        "max_samples":       500,            # full val=10K；500 → ±4.4% CI@95%
+        "max_new_tokens":    10,
+        "standard_shots":    10,
+        "use_cot":           False,
+        "description":       "常识句子补全 (A–D)，10-shot",
     },
     "winogrande": {
-        "hf_id":          "allenai/winogrande",
-        "hf_name":        "winogrande_xl",
-        "hf_split":       "validation",
-        "max_samples":    500,   # full val=1267；取 500 覆盖 ~40%
-        "max_new_tokens": 10,
-        "description":    "代词消歧二选一 (A/B)，5-shot（待实现）",
-        "standard_shots": 5,
+        "hf_id":             "allenai/winogrande",
+        "hf_name":           "winogrande_xl",
+        "hf_split":          "validation",
+        "few_shot_hf_split": "train",        # 5-shot 示例取自 train
+        "max_samples":       500,            # full val=1267
+        "max_new_tokens":    10,
+        "standard_shots":    5,
+        "use_cot":           False,
+        "description":       "代词消歧二选一 (A/B)，5-shot",
     },
     "truthfulqa_mc": {
-        "hf_id":          "truthful_qa",
-        "hf_name":        "multiple_choice",
-        "hf_split":       "validation",
-        "max_samples":    817,   # full val=817；直接跑全集，0-shot（设计如此）
-        "max_new_tokens": 10,
-        "description":    "事实性多选题 MC1，0-shot（原论文设计）",
-        "standard_shots": 0,
+        "hf_id":             "truthful_qa",
+        "hf_name":           "multiple_choice",
+        "hf_split":          "validation",
+        "few_shot_hf_split": None,           # 0-shot：原论文设计，加示例反而干扰
+        "max_samples":       817,            # full val=817，直接跑全集
+        "max_new_tokens":    10,
+        "standard_shots":    0,
+        "use_cot":           False,
+        "description":       "事实性多选题 MC1，0-shot",
     },
 }
 
@@ -180,6 +190,56 @@ def _load_dataset_cached(
     return samples
 
 
+def _load_few_shot_examples(
+    benchmark_name: str,
+    cfg: dict,
+    dataset_dir: str | Path,
+) -> list[dict]:
+    """从 train/dev split 加载 few-shot 示例，本地缓存避免重复下载。
+
+    few-shot 示例与测试集严格分离：
+      - 测试集：cfg["hf_split"]（test / validation）
+      - few-shot 示例：cfg["few_shot_hf_split"]（train / validation，与测试不重叠）
+
+    缓存路径：{dataset_dir}/quality_suite/few_shot/{benchmark_name}/shots_{n}.json
+
+    Args:
+        benchmark_name: BENCHMARK_CONFIGS 中的键
+        cfg: 对应配置字典
+        dataset_dir: 数据集根目录
+
+    Returns:
+        few-shot 样本字典列表；0-shot 时返回空列表
+    """
+    n_shots        = cfg.get("standard_shots", 0)
+    few_shot_split = cfg.get("few_shot_hf_split")
+
+    if n_shots == 0 or not few_shot_split:
+        return []
+
+    cache_dir  = Path(dataset_dir) / "quality_suite" / "few_shot" / benchmark_name
+    cache_path = cache_dir / f"shots_{n_shots}.json"
+
+    if cache_path.exists():
+        with open(cache_path, encoding="utf-8") as f:
+            return json.load(f)
+
+    from datasets import load_dataset
+    print(f"[Quality] Downloading few-shot examples: {benchmark_name} ({few_shot_split}) ...")
+    load_kwargs: dict = {"split": few_shot_split, "trust_remote_code": True}
+    if "hf_name" in cfg:
+        load_kwargs["name"] = cfg["hf_name"]
+    ds       = load_dataset(cfg["hf_id"], **load_kwargs)
+    examples = [dict(ds[i]) for i in range(min(n_shots, len(ds)))]
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    with open(cache_path, "w", encoding="utf-8") as f:
+        json.dump(examples, f, ensure_ascii=False, indent=2)
+
+    print(f"[Quality] {benchmark_name}: {n_shots}-shot examples cached")
+    return examples
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # 推理工具：chat template + 贪婪解码
 # ──────────────────────────────────────────────────────────────────────────────
@@ -259,72 +319,180 @@ def _extract_num(text: str) -> str:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 各基准 Prompt 格式化函数
+# Prompt 构建函数（few-shot + CoT）
+#
+# 每个函数接收 few_shot_examples（0-shot 时为空列表）和 test_sample，
+# 返回完整的 user message 字符串（传入 apply_chat_template 的 content）。
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _format_mmlu_pro(sample: dict) -> tuple[str, str]:
-    """MMLU-Pro：最多 10 个选项（A–J）。"""
-    opts = sample.get("options", [])
+def _build_mmlu_pro_prompt(
+    few_shot_examples: list[dict],
+    test_sample: dict,
+) -> tuple[str, str]:
+    """MMLU-Pro 5-shot：大学级知识多选题（A–J）。
+
+    示例格式（每个 few-shot example）：
+        Question: ...
+        Options:
+        A. ...  B. ...
+        Answer: C
+
+    测试格式（末尾不给答案）：
+        Question: ...
+        Options:
+        A. ...
+        Answer with a single letter (A–J):
+    """
+    lines = ["The following are multiple choice questions (with answers).\n"]
+
+    for ex in few_shot_examples:
+        opts    = ex.get("options", [])
+        opt_str = "\n".join(f"{chr(65 + i)}. {o}" for i, o in enumerate(opts))
+        ans     = str(ex.get("answer", "")).strip().upper()
+        lines.append(
+            f"Question: {ex.get('question', '')}\n\n"
+            f"Options:\n{opt_str}\n\n"
+            f"Answer: {ans}\n"
+        )
+
+    opts    = test_sample.get("options", [])
     opt_str = "\n".join(f"{chr(65 + i)}. {o}" for i, o in enumerate(opts))
-    prompt = (
-        f"Question: {sample.get('question', '')}\n\n"
+    n_opts  = len(opts)
+    lines.append(
+        f"Question: {test_sample.get('question', '')}\n\n"
         f"Options:\n{opt_str}\n\n"
-        f"Answer with a single letter ({chr(65)}–{chr(64 + len(opts))}):"
+        f"Answer with a single letter ({chr(65)}–{chr(64 + max(n_opts, 1))}):"
     )
-    correct = str(sample.get("answer", "")).strip().upper()
-    return prompt, correct
+    correct = str(test_sample.get("answer", "")).strip().upper()
+    return "\n".join(lines), correct
 
 
-def _format_gsm8k(sample: dict) -> tuple[str, str]:
-    """GSM8K：链式推理，答案在 '####' 之后。"""
-    prompt = (
-        f"Solve step by step. End your answer with '#### <number>'.\n\n"
-        f"Problem: {sample.get('question', '')}"
+def _build_gsm8k_cot_prompt(
+    few_shot_examples: list[dict],
+    test_sample: dict,
+) -> tuple[str, str]:
+    """GSM8K 8-shot Chain-of-Thought：数学推理，答案以 '#### <number>' 结尾。
+
+    示例格式（来自 train split，answer 字段已包含 CoT + #### 格式）：
+        Problem: Tom has 5 apples...
+        Solution: Tom starts with 5... 5 + 3 = 8. #### 8
+
+    测试格式：
+        Problem: ...
+        Solution:       ← 让模型续写 CoT
+    """
+    lines = [
+        "Solve each math problem step by step. "
+        "Show your reasoning and end your answer with '#### <number>'.\n"
+    ]
+
+    for ex in few_shot_examples:
+        answer_text = ex.get("answer", "")
+        lines.append(
+            f"Problem: {ex.get('question', '')}\n"
+            f"Solution: {answer_text}\n"
+        )
+
+    lines.append(
+        f"Problem: {test_sample.get('question', '')}\n"
+        f"Solution:"
     )
-    answer_text = sample.get("answer", "")
+
+    # 从 answer 字段提取数字作为 gold label
+    answer_text = test_sample.get("answer", "")
     if "####" in answer_text:
         correct = answer_text.split("####")[-1].strip().replace(",", "")
     else:
         correct = _extract_num(answer_text)
-    return prompt, correct
+    return "\n".join(lines), correct
 
 
-def _format_hellaswag(sample: dict) -> tuple[str, str]:
-    """HellaSwag：从 4 个结尾中选最合适的一个（A–D）。"""
-    endings = sample.get("endings", [])
-    ctx     = sample.get("ctx", "")
+def _build_hellaswag_prompt(
+    few_shot_examples: list[dict],
+    test_sample: dict,
+) -> tuple[str, str]:
+    """HellaSwag 10-shot：常识句子补全（A–D）。
+
+    示例格式：
+        Text: [context]
+        A. [ending0]  B. [ending1]  C. [ending2]  D. [ending3]
+        Answer: B
+
+    测试格式：
+        Text: [context]
+        A. ...
+        Answer with a single letter (A–D):
+    """
+    lines = ["Choose the best ending for each text.\n"]
+
+    for ex in few_shot_examples:
+        endings = ex.get("endings", [])
+        opt_str = "\n".join(f"{chr(65 + i)}. {e}" for i, e in enumerate(endings))
+        gold    = chr(65 + int(ex.get("label", 0)))
+        lines.append(
+            f"Text: {ex.get('ctx', '')}\n"
+            f"{opt_str}\n"
+            f"Answer: {gold}\n"
+        )
+
+    endings = test_sample.get("endings", [])
     opt_str = "\n".join(f"{chr(65 + i)}. {e}" for i, e in enumerate(endings))
-    prompt = (
-        f"Choose the best ending for the following text.\n\n"
-        f"Text: {ctx}\n\n"
-        f"{opt_str}\n\n"
+    lines.append(
+        f"Text: {test_sample.get('ctx', '')}\n"
+        f"{opt_str}\n"
         f"Answer with a single letter (A–D):"
     )
-    label   = int(sample.get("label", 0))
-    correct = chr(65 + label)
-    return prompt, correct
+    correct = chr(65 + int(test_sample.get("label", 0)))
+    return "\n".join(lines), correct
 
 
-def _format_winogrande(sample: dict) -> tuple[str, str]:
-    """WinoGrande：填空，二选一（A/B）。"""
-    prompt = (
-        f"Fill in the blank with the correct option.\n\n"
-        f"Sentence: {sample.get('sentence', '')}\n\n"
-        f"A. {sample.get('option1', '')}\n"
-        f"B. {sample.get('option2', '')}\n\n"
+def _build_winogrande_prompt(
+    few_shot_examples: list[dict],
+    test_sample: dict,
+) -> tuple[str, str]:
+    """WinoGrande 5-shot：代词消歧填空（A/B）。
+
+    示例格式：
+        Sentence: [sentence with _]
+        A. [option1]  B. [option2]
+        Answer: A
+
+    测试格式：
+        Sentence: ...
+        A. ...  B. ...
+        Answer with A or B:
+    """
+    lines = ["Fill in the blank with the correct option.\n"]
+
+    for ex in few_shot_examples:
+        gold = "A" if str(ex.get("answer", "1")) == "1" else "B"
+        lines.append(
+            f"Sentence: {ex.get('sentence', '')}\n"
+            f"A. {ex.get('option1', '')}\n"
+            f"B. {ex.get('option2', '')}\n"
+            f"Answer: {gold}\n"
+        )
+
+    correct = "A" if str(test_sample.get("answer", "1")) == "1" else "B"
+    lines.append(
+        f"Sentence: {test_sample.get('sentence', '')}\n"
+        f"A. {test_sample.get('option1', '')}\n"
+        f"B. {test_sample.get('option2', '')}\n"
         f"Answer with A or B:"
     )
-    correct = "A" if str(sample.get("answer", "1")) == "1" else "B"
-    return prompt, correct
+    return "\n".join(lines), correct
 
 
-def _format_truthfulqa(sample: dict) -> tuple[str | None, str | None]:
-    """TruthfulQA MC1：从所有选项中选出唯一正确答案。
+def _build_truthfulqa_prompt(
+    few_shot_examples: list[dict],
+    test_sample: dict,
+) -> tuple[str | None, str | None]:
+    """TruthfulQA MC1：0-shot（原论文设计，加示例反而干扰）。
 
     Returns:
         (prompt, correct_letter)，若样本无选项则返回 (None, None)
     """
-    mc1     = sample.get("mc1_targets", {})
+    mc1     = test_sample.get("mc1_targets", {})
     choices = mc1.get("choices", [])
     labels  = mc1.get("labels",  [])
     if not choices:
@@ -334,11 +502,21 @@ def _format_truthfulqa(sample: dict) -> tuple[str | None, str | None]:
     correct     = chr(65 + correct_idx)
     opt_str     = "\n".join(f"{chr(65 + i)}. {c}" for i, c in enumerate(choices))
     prompt = (
-        f"Question: {sample.get('question', '')}\n\n"
+        f"Question: {test_sample.get('question', '')}\n\n"
         f"{opt_str}\n\n"
         f"Answer with a single letter:"
     )
     return prompt, correct
+
+
+# 分发表：benchmark_name → prompt 构建函数
+_PROMPT_BUILDERS = {
+    "mmlu_pro":     _build_mmlu_pro_prompt,
+    "gsm8k":        _build_gsm8k_cot_prompt,
+    "hellaswag":    _build_hellaswag_prompt,
+    "winogrande":   _build_winogrande_prompt,
+    "truthfulqa_mc": _build_truthfulqa_prompt,
+}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -382,24 +560,20 @@ def run_single_benchmark(
     samples = _load_dataset_cached(benchmark_name, cfg, dataset_dir, seed)
     total   = len(samples)
 
+    # few-shot 示例：循环前一次性加载，所有样本共用同一套示例
+    few_shot_examples = _load_few_shot_examples(benchmark_name, cfg, dataset_dir)
+    n_shots = len(few_shot_examples)
+    cot_tag = " + CoT" if cfg.get("use_cot") else ""
+    print(f"\n[Quality] {benchmark_name} — {total} samples, "
+          f"{n_shots}-shot{cot_tag}  ({cfg['description']})")
+
+    builder  = _PROMPT_BUILDERS[benchmark_name]
     correct  = 0
     answered = 0
     skipped  = 0
 
-    print(f"\n[Quality] {benchmark_name} ({cfg['description']}) — {total} samples")
-
-    # 格式化函数分发表（避免大量 if/elif）
-    _formatters = {
-        "mmlu_pro_mini":   _format_mmlu_pro,
-        "gsm8k_mini":      _format_gsm8k,
-        "hellaswag_mini":  _format_hellaswag,
-        "winogrande_mini": _format_winogrande,
-        "truthfulqa_mc":   _format_truthfulqa,
-    }
-    formatter = _formatters[benchmark_name]
-
     for i, sample in enumerate(samples):
-        prompt, gold = formatter(sample)
+        prompt, gold = builder(few_shot_examples, sample)
 
         # TruthfulQA 样本可能无选项，跳过
         if prompt is None:
@@ -412,23 +586,24 @@ def run_single_benchmark(
         )
 
         # 解析答案
-        if benchmark_name == "gsm8k_mini":
-            # GSM8K：提取输出中 "####" 之后的数字，否则取最后一个数字
+        if benchmark_name == "gsm8k":
+            # GSM8K CoT：模型输出包含推理链，答案在 "####" 之后
             if "####" in output:
                 parsed = output.split("####")[-1].strip().replace(",", "")
                 parsed = _extract_num(parsed) or parsed
             else:
                 parsed = _extract_num(output)
             is_correct = bool(parsed) and (parsed == gold)
-        elif benchmark_name == "mmlu_pro_mini":
-            valid  = "ABCDEFGHIJ"
-            parsed = _extract_mc_letter(output, valid)
+        elif benchmark_name == "mmlu_pro":
+            # MMLU-Pro：最多 10 选项，A–J
+            parsed     = _extract_mc_letter(output, "ABCDEFGHIJ")
             is_correct = bool(parsed) and (parsed == gold)
-        elif benchmark_name == "winogrande_mini":
-            parsed = _extract_mc_letter(output, "AB")
+        elif benchmark_name == "winogrande":
+            parsed     = _extract_mc_letter(output, "AB")
             is_correct = bool(parsed) and (parsed == gold)
         else:
-            parsed = _extract_mc_letter(output, "ABCD")
+            # hellaswag / truthfulqa_mc：A–D
+            parsed     = _extract_mc_letter(output, "ABCD")
             is_correct = bool(parsed) and (parsed == gold)
 
         if parsed:
