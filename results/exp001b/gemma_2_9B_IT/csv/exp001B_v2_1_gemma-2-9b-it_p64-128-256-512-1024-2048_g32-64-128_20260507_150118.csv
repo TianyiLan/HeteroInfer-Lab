@@ -1,2 +1,0 @@
-prompt_len,requested_gen_len,actual_gen_len,ttft_ms,tpot_ms,tokens_s,peak_mem_mb,kv_est_mb,kv_pkv_prefill_mb,kv_pkv_final_mb,kv_peak_pct,status,message_zh,repeat_completed
-0,0,,,,,,,,,,oom,模型加载阶段发生 CUDA 显存不足；本次不自动降级模型或缩小 prompt_len，直接记录为 OOM。,0

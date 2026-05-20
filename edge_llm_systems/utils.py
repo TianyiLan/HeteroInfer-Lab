@@ -18,6 +18,33 @@ from typing import Any
 # 环境检测
 # ──────────────────────────────────────────────────────────────────────────────
 
+def get_hw_slug() -> str:
+    """返回当前 GPU 的文件系统安全短名，用于结果目录命名。
+
+    从 torch.cuda.get_device_name(0) 读取 GPU 名称，去除 "NVIDIA "、
+    "Tesla " 等厂商前缀，并截断内存/变体后缀（如 "-SXM4-40GB"）。
+
+    示例：
+        "Tesla T4"              → "T4"
+        "NVIDIA L4"             → "L4"
+        "NVIDIA A100-SXM4-40GB" → "A100"
+        "Tesla V100-SXM2-16GB"  → "V100"
+
+    无 GPU 时返回 "cpu"。
+    """
+    import torch
+    if not torch.cuda.is_available():
+        return "cpu"
+
+    name = torch.cuda.get_device_name(0)
+    for prefix in ("NVIDIA ", "Tesla ", "GeForce ", "Quadro "):
+        name = name.replace(prefix, "")
+    name = name.strip()
+    # 将每个空格分段的 token 截断到连字符之前，去掉显存/型号后缀
+    parts = [p.split("-")[0] for p in name.split()]
+    return "_".join(parts)
+
+
 def detect_environment() -> str:
     """检测当前运行环境。
 
@@ -306,30 +333,39 @@ def collect_run_config(
     Returns:
         运行配置字典
     """
-    input_mode = config.get("input_mode", "text_only")
+    # v2.2: modality 取代旧的 input_mode；兼容旧 key
+    modality = config.get("modality", config.get("input_mode", "text"))
+    # 兼容旧值：text_only → text
+    if modality == "text_only":
+        modality = "text"
+    elif modality in ("single_image", "multi_images"):
+        modality = "vision"
+
     info: dict = {
         "run_id":          run_id,
-        "experiment_name": "exp001_llama32_stage1_v2.1",
+        "experiment_name": "exp001_llama32_stage1_v2.2",
         "model_id":        model_id,
         "model_key":       model_key,
-        "input_mode":      input_mode,
+        "modality":        modality,
         "torch_dtype":     "float16",
-        "repeat":          config.get("repeat"),
-        "gen_lengths":     config.get("gen_lengths", []),
+        "enable_memory":     config.get("enable_memory"),
+        "enable_efficiency": config.get("enable_efficiency"),
+        "enable_quality":    config.get("enable_quality"),
         "raw_csv_path":    str(raw_csv_path),
         "summary_csv_path": str(summary_csv_path),
     }
 
-    if input_mode == "text_only":
-        prompt_lengths = config.get("prompt_lengths", [])
-        gen_lengths    = config.get("gen_lengths", [])
-        info["prompt_lengths"]  = prompt_lengths
-        # 完整参数矩阵，方便直接查看总组数
-        info["matrix_configs"]  = [
-            [p, g] for p in prompt_lengths for g in gen_lengths
-        ]
+    if modality == "text":
+        info["memory_prompt_lengths"]     = config.get("memory_prompt_lengths", [])
+        info["memory_gen_lengths"]        = config.get("memory_gen_lengths", [])
+        info["memory_repeat"]             = config.get("memory_repeat")
+        info["efficiency_prompt_lengths"] = config.get("efficiency_prompt_lengths", [])
+        info["efficiency_gen_lengths"]    = config.get("efficiency_gen_lengths", [])
+        info["efficiency_repeat"]         = config.get("efficiency_repeat")
     else:
+        info["image_counts"]      = config.get("image_counts", [])
         info["image_resolutions"] = config.get("image_resolutions", [])
+        info["gen_lengths"]       = config.get("gen_lengths", [])
 
     return info
 

@@ -1,0 +1,28 @@
+{
+  "run_20260518_135629_truthfulqa_mc1": {
+    "run_id": "run_20260518_135629",
+    "model_id": "meta-llama/Llama-3.2-3B-Instruct",
+    "seed": 42,
+    "timestamp": "2026-05-18 13:59:22",
+    "benchmark": "truthfulqa_mc1",
+    "benchmark_type": "text",
+    "num_fewshot": 0,
+    "limit": 817,
+    "accuracy": 33.54,
+    "stderr": 1.65,
+    "num_samples": 817
+  },
+  "run_20260518_135629_mmlu_pro": {
+    "run_id": "run_20260518_135629",
+    "model_id": "meta-llama/Llama-3.2-3B-Instruct",
+    "seed": 42,
+    "timestamp": "2026-05-18 15:35:42",
+    "benchmark": "mmlu_pro",
+    "benchmark_type": "text",
+    "num_fewshot": 5,
+    "limit": 504,
+    "accuracy": 33.33,
+    "stderr": 2.1,
+    "num_samples": 504
+  }
+}

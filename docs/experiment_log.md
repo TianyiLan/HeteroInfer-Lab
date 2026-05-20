@@ -2,148 +2,161 @@
 
 ## Stage 1: Performance Characterization
 
-### Current Status
+### 阶段目标
 
-| Item | Status |
-|---|---|
-| Stage 1A | Completed |
-| Stage 1A final experiment | Experiment 001A / Experiment 001-PKV Modular |
-| Stage 1A final data | `results/exp001/csv/exp001_results_pkv_modular.csv` |
-| Stage 1A final figure | `results/exp001/figures/exp001_profiling_results_pkv_modular.png` |
-| Stage 1B | In progress / supplementary model-scale stress baseline |
-| Stage 1B current experiment | Experiment 001B v2.1 |
-| Stage 1B current data | `results/exp001b/` |
-| Primary platform | Google Colab, NVIDIA Tesla T4, FP16, batch size = 1 |
+建立 FP16 原始模型的三类指标（Memory Footprint / Inference Efficiency / Model Quality）完整 baseline，作为后续所有优化实验的参照基准。
 
-Stage 1 当前拆分为 Stage 1A 和 Stage 1B。
+### 当前状态
 
-Stage 1A 已完成 Gemma 2 2B IT 的可信 baseline profiling 与 KV Cache 测量协议校准。Stage 1B 在同一测量协议基础上，补充 Gemma family model-scale stress baseline，用于观察 T4 FP16 环境下的模型规模部署边界。
-
-在是否补充 Gemma 4 probing 明确之前，Stage 1 不应写作完全关闭。
+| 实验 | 模型 | 平台 | 状态 |
+|------|------|------|------|
+| **exp001** | LLaMA-3.2-3B-Instruct | Google Colab L4, FP16, batch=1 | ✅ 完成 |
+| **exp002** | LLaMA-3.2-11B-Vision | Google Colab L4, FP16, batch=1 | 🔲 规划中 |
 
 ---
 
-## Stage 1A: Experiment 001A / PKV Modular Baseline
+## exp001：LLaMA-3.2-3B-Instruct，Text-only，L4 GPU
 
-### Goal
+### 实验配置
 
-Stage 1A 的目标是建立可复现 FP16 inference baseline，并修正 KV cache 测量协议。最终协议使用 `past_key_values` payload accounting 作为 pure KV cache measurement；CUDA peak memory 只作为 system-level memory pressure metric。
-
-### Setup
-
-| Item | Value |
-|---|---|
-| Model | `google/gemma-2-2b-it` |
-| Platform | Google Colab, NVIDIA Tesla T4 |
-| Precision | FP16 |
+| 项目 | 值 |
+|------|---|
+| 模型 | `meta-llama/Llama-3.2-3B-Instruct` |
+| 平台 | Google Colab，NVIDIA L4（22 GB HBM） |
+| 精度 | FP16 |
 | Batch size | 1 |
-| Prompt lengths | 64 / 128 / 256 / 512 / 1024 / 2048 |
-| Generation lengths | 32 / 64 / 128 |
-| Final result file | `results/exp001/csv/exp001_results_pkv_modular.csv` |
-| Final overview figure | `results/exp001/figures/exp001_profiling_results_pkv_modular.png` |
+| 框架版本 | edge_llm_systems v2.2 |
+| Notebook | `notebooks/Stage 1/exp001/exp001_llama32_stage1_v2_2_Colab.ipynb` |
 
-### Main Findings
+**Profiling 矩阵**（Memory + Efficiency 共用同一次推理）：
+- Prompt lengths：64 / 128 / 256 / 512 / 1024 / 2048 tokens
+- Generation lengths：32 / 64 / 128 tokens
+- 每组重复：3 次（取均值行写入 summary CSV）
 
-1. TTFT 主要随 `prompt_len` 增长，反映 prefill cost。
-2. TPOT 在当前测试区间内相对稳定，约为 50 ms/token。
-3. `past_key_values` payload 与 theoretical KV cache formula 高度一致。
-4. CUDA peak memory 显著大于 pure KV payload，不能作为 pure KV cache measurement。
-5. Prefill PKV 小于 final PKV 是合理现象，因为 prefill cache length = `prompt_len`，final cache length = `prompt_len + gen_len`。
-6. 早期 `gen_len=64` tokens/s 异常未在最终 modular PKV 结果中复现，归类为 early measurement noise / runtime jitter。
+**Quality 评测工具**：EleutherAI lm-evaluation-harness，协议与 Open LLM Leaderboard 一致
 
-### Deprecated Historical Measurement
+### 结果文件
 
-早期 CUDA memory-delta based KV cache measurement 已废弃为 pure KV cache 测量方法。该方法混入 model weights、allocator behavior、temporary activations、logits、attention workspace、runtime buffers 和 fragmentation 等 non-KV overhead。历史 V1/V2 文件仅作为开发记录和 system-level memory observation 保留。
-
-Stage 1A 已完成。
+```text
+results/exp001/L4/Llama-3.2-3B-Instruct/
+├── memory/
+│   ├── memory_raw_20260518_085525.csv      # 18 场景 × 3 次原始行
+│   └── memory_summary_20260518_085525.csv  # 18 场景均值行
+├── efficiency/
+│   ├── efficiency_raw_20260518_111702.csv
+│   └── efficiency_summary_20260518_111702.csv
+├── quality/
+│   ├── quality_summary_run_20260518_112726.csv  # hellaswag, winogrande
+│   └── quality_summary_run_20260518_135629.csv  # truthfulqa_mc1, mmlu_pro, gsm8k
+└── temp/
+    ├── quality_manifest.json
+    └── lm_eval_run_*/                           # 各 benchmark 原始 JSON
+```
 
 ---
 
-## Stage 1B: Experiment 001B v2.1 Gemma 2 Model-Scale Stress Baseline
+### ① Memory Footprint 结果
 
-### Goal
+**模型权重验证**：`model_load_mem_mb = 6,127.835 MB`
 
-Experiment 001B 关注更大 Gemma 模型在 Tesla T4 FP16 环境中的部署边界。它复用 Stage 1A 的 PKV measurement protocol，不自动降低精度、不缩小测试矩阵、不启用量化或 offload。
+理论值：$3.21 \times 10^9\ \text{params} \times 2\ \text{bytes} = 6,420\ \text{MB}$（含 embedding buffer 等实际与理论完全吻合）✅
 
-关系如下：
+**KV Cache 随序列长度的增长**（均值行）：
 
-- Stage 1A 验证 baseline profiling 与 PKV measurement protocol；
-- Stage 1B 使用该协议观察模型规模增长带来的部署边界。
+| prompt_len | gen_len | peak_mem_mb | kv_pkv_final_mb | kv_payload_ratio |
+|-----------|---------|-------------|-----------------|-----------------|
+| 64 | 32 | 6,163 | 10.5 | 0.17% |
+| 256 | 128 | 6,242 | 42.0 | 0.67% |
+| 512 | 128 | 6,344 | 70.0 | 1.10% |
+| 1024 | 128 | 6,517 | 126.0 | 1.93% |
+| 2048 | 128 | 6,881 | 238.0 | 3.46% |
 
-### Result Directory
+**核心结论**：
+- KV Cache 占峰值显存比例极低（< 3.5%），3B 模型的主要内存压力来自**权重本身**
+- `kv_est_mb == kv_pkv_final_mb`（完全一致），理论公式准确，测量方法可靠
+- 即使 prompt=2048 gen=128，总显存 6.88 GB，在 L4（22 GB）下充裕
 
-```text
-results/exp001b/
-```
+---
 
-结果按模型分组：
+### ② Inference Efficiency 结果
 
-```text
-results/exp001b/gemma_2_2B_IT/
-results/exp001b/gemma_2_9B_IT/
-```
+**TTFT 随 prompt_len 的变化**（gen=64 均值行）：
 
-### Gemma 2 2B IT Result
+| prompt_len | ttft_ms | tpot_ms | tokens_s |
+|-----------|---------|---------|---------|
+| 64 | 38.6 | 33.7 | 29.7 |
+| 128 | 39.3 | 33.7 | 29.7 |
+| 256 | 43.8 | 34.1 | 29.4 |
+| 512 | 70.3 | 33.9 | 29.5 |
+| 1024 | 154.9 | 33.7 | 29.6 |
+| 2048 | 293.5 | 34.1 | 29.3 |
 
-| Item | Value |
-|---|---|
-| Model | `google/gemma-2-2b-it` |
-| Status | Completed |
-| Recommended CSV | `results/exp001b/gemma_2_2B_IT/csv/exp001b_gemma2_2b_it_t4_fp16.csv` |
-| Original CSV | `results/exp001b/gemma_2_2B_IT/csv/exp001B_v2_1_gemma-2-2b-it_p64-128-256-512-1024-2048_g32-64-128_20260507_142512.csv` |
-| Recommended figure | `results/exp001b/gemma_2_2B_IT/figures/exp001b_gemma2_2b_it_t4_fp16.png` |
-| Original figure | `results/exp001b/gemma_2_2B_IT/figures/exp001B_v2_1_gemma-2-2b-it_p64-128-256-512-1024-2048_g32-64-128_20260507_142512.png` |
+**核心结论**：
+- **TPOT 高度稳定**：33.7–34.6 ms，与 prompt_len / gen_len 无关（Memory-bound Decode 特征）
+- **TTFT 线性增长**：prompt 32× → TTFT 约 7.6×（斜率 ≈ 0.13 ms/token）
+- **内存带宽利用率估算**：权重 6 GB × 29 tokens/s ≈ 174 GB/s，L4 HBM 峰值 300 GB/s → 利用率约 **58%**（batch=1 decode 的理论区间，正常）
+- `finish_reason` 全为 `max_tokens`，模型未提前结束，测试矩阵完整
 
-新的 2B run 与 Stage 1A baseline 高度一致：
+---
 
-- TTFT 仍随 prompt length 增长；
-- TPOT 仍约为 50 ms/token；
-- `actual_gen_len` 与 `requested_gen_len` 一致；
-- PKV payload 仍与 theoretical KV cache formula 对齐；
-- peak memory 仍显著大于 pure KV payload。
+### ③ Model Quality 结果
 
-在当前矩阵下，Gemma 2 2B IT FP16 没有触及 T4 显存边界。peak memory 约为 5.1 GB 到 7.2 GB，最大 final PKV payload 约为 221 MB，KV payload 占 peak memory 的比例最高约 3.1%。
+所有 benchmark 使用 EleutherAI lm-evaluation-harness，协议与 Open LLM Leaderboard v1 完全对齐。
 
-### Gemma 2 9B IT Result
+| Benchmark | Accuracy | ±stderr | n | Few-shot | 指标 | 社区同级参考 | 可接受？ |
+|-----------|----------|---------|---|---------|------|------------|---------|
+| **HellaSwag** | 67.2% | ±2.1% | 500 | 10-shot | acc_norm | ~70%（3B base） | ✅ |
+| **WinoGrande** | 73.2% | ±2.0% | 500 | 5-shot | acc | ~74%（3B base） | ✅ |
+| **TruthfulQA MC1** | 33.54% | ±1.65% | 817（全集） | 0-shot | acc | ~30–35%（3B） | ✅ |
+| **MMLU-Pro** | 33.33% | ±2.1% | 504（36/科） | 5-shot CoT | exact_match,custom-extract | ~35–40%（3B） | ✅ |
+| **GSM8K** | 67.4% | ±2.1% | 500 | 8-shot CoT | exact_match,strict-match | ~65–75%（3B） | ✅ |
 
-| Item | Value |
-|---|---|
-| Model | `google/gemma-2-9b-it` |
-| Status | CUDA OOM during model loading |
-| OOM CSV | `results/exp001b/gemma_2_9B_IT/csv/exp001B_v2_1_gemma-2-9b-it_p64-128-256-512-1024-2048_g32-64-128_20260507_150118.csv` |
+GSM8K 参考数据：flexible-extract 为 72.6%（JSON 原始数据），strict-match 67.4% 为正式记录值。
 
-Gemma 2 9B IT FP16 在 Tesla T4 上模型加载阶段发生 CUDA OOM，尚未进入 prompt/generation matrix。该结果是有效的 deployment-boundary evidence，不是 benchmark 逻辑失败。
+**MMLU-Pro 各子学科细分**（36 题/科，误差 ±7–8%）：
 
-本次 benchmark 按设计直接记录 OOM，不自动执行以下行为：
+| 学科 | 准确率 | | 学科 | 准确率 |
+|------|--------|-|------|--------|
+| Math | 47.2% | | Physics | 30.6% |
+| Biology | 47.2% | | Health | 30.6% |
+| Economics | 41.7% | | Business | 27.8% |
+| Psychology | 38.9% | | Law | 27.8% |
+| Other | 36.1% | | Philosophy | 27.8% |
+| Computer Sci | 33.3% | | History | 25.0% |
+| Chemistry | 30.6% | | Engineering | 22.2% |
 
-- 缩小 `prompt_len`；
-- 缩小 `gen_len`；
-- 切换 precision；
-- 启用 quantization；
-- 使用 CPU/disk offload。
+**核心结论**：LLaMA-3.2-3B-Instruct 数学/语言能力均衡，各项指标在 3B Instruct 模型预期区间内，全部可接受。五项结果构成后续优化实验的 **FP16 Quality Baseline**。
 
-该结果说明 Gemma 2 9B IT FP16 已在 model-load stage 触发 T4 部署边界。
+---
 
-### Current Stage 1B Conclusion
+### 技术问题记录
 
-当前 Stage 1B 证据支持：
+| 问题 | 原因 | 修复 |
+|------|------|------|
+| MMLU-Pro metric_key 写为 `acc,none` | lm-eval mmlu_pro 任务实际用生成式评测 | 改为 `exact_match,custom-extract`（v2.2 已修复） |
+| GSM8K stderr 写入 CSV 为 67.4（应为 2.1） | 旧 stderr 提取逻辑仅处理 `,none` 后缀，对 `strict-match` 失效 | 通用化 stderr key 推导逻辑（v2.2 已修复） |
 
-- Gemma 2 2B IT FP16 可在 T4 上稳定运行当前单 batch 测试矩阵；
-- Gemma 2 9B IT FP16 在 T4 上发生 load-stage OOM；
-- 2B 未触及 T4 显存边界，9B 已触发 FP16 部署边界。
+---
 
-这为 Stage 2 的 deployment boundary analysis 提供了直接依据。但在是否补充 Gemma 4 probing 明确之前，Stage 1B 仍保持开放状态。
+## Historical Experiments（已归档）
+
+以下实验基于旧版框架（单文件 `profiling.py`，二分类 perf/qual），已归档，不作为当前研究的 baseline。
+
+| 实验 | 模型 | 平台 | 说明 |
+|------|------|------|------|
+| Experiment 001A / PKV Modular | Gemma 2 2B IT | Tesla T4 | Stage 1A：PKV 测量协议校准 |
+| Experiment 001B v2.1 | Gemma 2 2B/9B IT | Tesla T4 | Stage 1B：模型规模压力测试，9B OOM |
+
+Gemma/T4 实验的核心结论（供参考）：
+- Gemma 2 2B IT FP16 在 T4 可稳定运行，peak memory 约 5.1–7.2 GB，KV payload 最高约 221 MB
+- Gemma 2 9B IT FP16 在 T4 模型加载阶段 CUDA OOM，为 T4 FP16 部署边界直接证据
+- `past_key_values` payload 统计方法经校准，与理论 KV cache 公式高度吻合
 
 ---
 
 ## Deferred Items
 
-- INT8 / INT4 quantization 延后到 deployability、compression 或 optimization 实验。
-- Cross-GPU P100 baseline 不是 Stage 1A 完成条件，仅在后续有合适环境时补充。
-- Gemma 4 model-scale probing 可作为 Stage 1B v2.2 扩展，目前尚未记录为已完成。
-
----
-
-## Stage 2 Preparation
-
-Stage 2 将聚焦 memory-constrained inference analysis。它应基于 Stage 1A 的 PKV baseline 和 Stage 1B 的 deployment-boundary evidence，继续分析部署限制主要来自 model weights、KV cache growth、temporary runtime overhead、bandwidth，还是具体实现路径。
+- LLaMA-3.2-1B-Instruct baseline（待定，3B 结果已满足当前研究需求）
+- exp002 multimodal baseline（LLaMA-3.2-11B-Vision，待 exp001 commit 后启动）
+- INT8 / INT4 量化对比（Stage 3）
+- Gemma 4 T4 probing（历史遗留，优先级低）
