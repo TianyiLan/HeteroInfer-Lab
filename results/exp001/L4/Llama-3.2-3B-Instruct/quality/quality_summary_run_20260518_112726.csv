@@ -1,0 +1,6 @@
+﻿run_id,model_id,seed,timestamp,benchmark,benchmark_type,num_fewshot,limit,accuracy,stderr,num_samples
+run_20260518_112726,meta-llama/Llama-3.2-3B-Instruct,42,2026/5/18 11:34,hellaswag,text,10,500,67.2,2.1,500
+run_20260518_112726,meta-llama/Llama-3.2-3B-Instruct,42,2026/5/18 11:48,winogrande,text,5,500,73.2,1.98,500
+run_20260518_135629,meta-llama/Llama-3.2-3B-Instruct,42,2026/5/18 13:59,truthfulqa_mc1,text,0,817,33.54,1.65,817
+run_20260518_135629,meta-llama/Llama-3.2-3B-Instruct,42,2026/5/18 15:33,mmlu_pro,text,5,504,33.33,2.1,504
+run_20260518_135629,meta-llama/Llama-3.2-3B-Instruct,42,2026/5/18 16:13,gsm8k,text,8,500,67.4,2.1,500

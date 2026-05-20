@@ -1,0 +1,28 @@
+{
+  "run_20260518_112726_hellaswag": {
+    "run_id": "run_20260518_112726",
+    "model_id": "meta-llama/Llama-3.2-3B-Instruct",
+    "seed": 42,
+    "timestamp": "2026-05-18 11:34:50",
+    "benchmark": "hellaswag",
+    "benchmark_type": "text",
+    "num_fewshot": 10,
+    "limit": 500,
+    "accuracy": 67.2,
+    "stderr": 2.1,
+    "num_samples": 500
+  },
+  "run_20260518_112726_winogrande": {
+    "run_id": "run_20260518_112726",
+    "model_id": "meta-llama/Llama-3.2-3B-Instruct",
+    "seed": 42,
+    "timestamp": "2026-05-18 11:48:55",
+    "benchmark": "winogrande",
+    "benchmark_type": "text",
+    "num_fewshot": 5,
+    "limit": 500,
+    "accuracy": 73.2,
+    "stderr": 1.98,
+    "num_samples": 500
+  }
+}
