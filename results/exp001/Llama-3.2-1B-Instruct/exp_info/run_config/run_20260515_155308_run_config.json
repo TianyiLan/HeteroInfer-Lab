@@ -1,0 +1,98 @@
+{
+  "run_id": "run_20260515_155308",
+  "experiment_name": "exp001_llama32_stage1_v2.1",
+  "model_id": "meta-llama/Llama-3.2-1B-Instruct",
+  "model_key": "LLaMA-3.2-1B",
+  "input_mode": "text_only",
+  "torch_dtype": "float16",
+  "repeat": 3,
+  "gen_lengths": [
+    32,
+    64,
+    128
+  ],
+  "raw_csv_path": "/content/drive/MyDrive/EdgeLLM-Systems/results/exp001/Llama-3.2-1B-Instruct/perf_raw_20260515_155308.csv",
+  "summary_csv_path": "/content/drive/MyDrive/EdgeLLM-Systems/results/exp001/Llama-3.2-1B-Instruct/perf_summary_20260515_155308.csv",
+  "prompt_lengths": [
+    64,
+    128,
+    256,
+    512,
+    1024,
+    2048
+  ],
+  "matrix_configs": [
+    [
+      64,
+      32
+    ],
+    [
+      64,
+      64
+    ],
+    [
+      64,
+      128
+    ],
+    [
+      128,
+      32
+    ],
+    [
+      128,
+      64
+    ],
+    [
+      128,
+      128
+    ],
+    [
+      256,
+      32
+    ],
+    [
+      256,
+      64
+    ],
+    [
+      256,
+      128
+    ],
+    [
+      512,
+      32
+    ],
+    [
+      512,
+      64
+    ],
+    [
+      512,
+      128
+    ],
+    [
+      1024,
+      32
+    ],
+    [
+      1024,
+      64
+    ],
+    [
+      1024,
+      128
+    ],
+    [
+      2048,
+      32
+    ],
+    [
+      2048,
+      64
+    ],
+    [
+      2048,
+      128
+    ]
+  ]
+}
